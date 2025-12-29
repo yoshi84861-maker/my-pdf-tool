@@ -2,18 +2,29 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
-import plotly.express as px # 這是畫圖用的零件
+try:
+    import plotly.express as px
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
 
-st.set_page_config(page_title="消費分析 App", layout="wide")
-st.title("📊 帳單消費大數據分析")
+st.set_page_config(page_title="消費大數據分析", layout="wide")
+st.title("📊 帳單深度分析報告")
 
-# --- 設定分類規則 (你可以自行修改或增加) ---
+# --- 店家名稱精簡化邏輯 ---
+def clean_shop_name(name):
+    # 移除常見的雜質
+    name = re.sub(r'(TAIPEI|TAICHUNG|KAOHSIUNG|TW|－|—)', '', name) # 移除城市名與橫線
+    name = re.sub(r'\d+.*店', '', name) # 移除像「參店」、「012店」等分店資訊
+    name = name.strip()
+    return name[:15] # 取前15個字，避免太長
+
+# --- 設定分類規則 ---
 CATEGORIES = {
-    "餐飲美食": ["肉排", "餐", "飯", "麵", "星巴克", "麥當勞", "飲料", "食"],
-    "交通運輸": ["中油", "台鐵", "高鐵", "計程車", "LINE TAXI", "停車", "加油"],
-    "線上購物": ["蝦皮", "MOMO", "PCHOME", "亞馬遜", "街口", "藍新"],
-    "生活繳費": ["電信", "水費", "電費", "保險"],
-    "休閒娛樂": ["電影", "Netflix", "Spotify", "KTV", "飯店"]
+    "餐飲美食": ["肉排", "餐", "飯", "麵", "星巴克", "麥當勞", "飲料", "食", "咖啡", "壽司"],
+    "交通運輸": ["中油", "台鐵", "高鐵", "計程車", "LINE TAXI", "停車", "加油", "悠遊卡"],
+    "線上購物": ["蝦皮", "MOMO", "PCHOME", "亞馬遜", "街口", "藍新", "支付"],
+    "生活繳費": ["電信", "水費", "電費", "保險", "醫院"],
 }
 
 def auto_category(detail):
@@ -34,6 +45,7 @@ if uploaded_file is not None:
                 if table:
                     for row in table:
                         text = " ".join([str(item) for item in row if item is not None])
+                        # 這裡使用你之前成功的精準切片模式
                         pattern = r'(\d+/\d+/\d+)\s+(\d+/\d+/\d+)\s+(.*?)\s+(\d+[\d,]*)\s+TW'
                         match = re.search(pattern, text)
                         if match:
@@ -43,34 +55,52 @@ if uploaded_file is not None:
             if refined_data:
                 df = pd.DataFrame(refined_data, columns=['日期', '消費明細', '金額'])
                 df['數值金額'] = df['金額'].str.replace(',', '').astype(float)
-                
-                # --- 自動分類 ---
                 df['分類'] = df['消費明細'].apply(auto_category)
+                df['精簡店家'] = df['消費明細'].apply(clean_shop_name)
 
-                # --- 顯示數據摘要 ---
-                total_sum = df['數值金額'].sum()
-                st.metric("本月消費總計", f"${total_sum:,.0f}")
+                # --- 頂部指標 ---
+                st.metric("本月消費總額", f"${df['數值金額'].sum():,.0f}")
+                st.divider()
 
-                # --- 建立視覺化圖表 ---
-                col1, col2 = st.columns([1, 1])
-                
+                # --- 第一區：圖表分析 ---
+                col1, col2 = st.columns(2)
                 with col1:
-                    st.write("### 🍱 分類統計")
-                    cat_df = df.groupby('分類')['數值金額'].sum().reset_index()
-                    fig = px.pie(cat_df, values='數值金額', names='分類', hole=0.4, title="消費佔比圖")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.write("### 🍱 消費類別佔比")
+                    if HAS_PLOTLY:
+                        cat_df = df.groupby('分類')['數值金額'].sum().reset_index()
+                        fig_pie = px.pie(cat_df, values='數值金額', names='分類', hole=0.4)
+                        st.plotly_chart(fig_pie, use_container_width=True)
 
                 with col2:
-                    st.write("### 📝 明細表")
+                    st.write("### 🏪 常去店家排行 (次數)")
+                    # 統計店家出現次數
+                    shop_counts = df['精簡店家'].value_counts().reset_index()
+                    shop_counts.columns = ['店家名稱', '消費次數']
+                    if HAS_PLOTLY:
+                        fig_bar = px.bar(shop_counts.head(10), x='消費次數', y='店家名稱', 
+                                         orientation='h', color='消費次數',
+                                         color_continuous_scale='Viridis')
+                        # 讓座標軸由大到小排
+                        fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+                        st.plotly_chart(fig_bar, use_container_width=True)
+
+                # --- 第二區：店家消費金額排行 ---
+                st.divider()
+                st.write("### 💰 店家貢獻度 (誰賺你最多錢？)")
+                shop_money = df.groupby('精簡店家')['數值金額'].sum().sort_values(ascending=False).reset_index()
+                shop_money.columns = ['店家名稱', '累計金額']
+                
+                # 顯示前五名
+                top_cols = st.columns(5)
+                for i, row in shop_money.head(5).iterrows():
+                    with top_cols[i]:
+                        st.info(f"**{row['店家名稱']}**\n\n${row['累計金額']:,.0f}")
+
+                # --- 第三區：完整清單 ---
+                with st.expander("查看完整明細清單"):
                     st.dataframe(df[['日期', '消費明細', '分類', '金額']], use_container_width=True)
 
-                # --- 額外：支出排行 ---
-                st.write("### 🔝 本月前三大支出")
-                top_3 = df.nlargest(3, '數值金額')
-                for i, row in top_3.iterrows():
-                    st.warning(f"第 {i+1} 名: {row['消費明細']} - ${row['數值金額']:,.0f}")
-
             else:
-                st.error("無法解析內容。")
+                st.error("無法解析內容，請確認 PDF 格式。")
     except Exception as e:
         st.error(f"分析出錯：{e}")
